@@ -1,0 +1,1 @@
+export const NGENIUS_CLIENT = 'NGENIUS_CLIENT';

@@ -1,0 +1,1 @@
+export const RAZORPAY_CLIENT = 'RAZORPAY_CLIENT';
