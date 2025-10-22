@@ -7,10 +7,8 @@ export class VectorStoreService implements OnModuleInit {
   private readonly logger = new Logger(VectorStoreService.name);
   private client: QdrantClient;
 
-  // Two separate collections
-  // private knowledgeCollection = 'ai_agent_knowledge'; // Your trained data
-  private knowledgeCollection = 'ai_agent_knowledge_dynamic'; // Your trained data
-  private conversationCollection = 'ai_agent_conversations'; // User chat history
+  private knowledgeCollection = 'ai_agent_knowledge_dynamic';
+  private conversationCollection = 'ai_agent_conversations';
 
   constructor() {}
 
@@ -36,8 +34,12 @@ export class VectorStoreService implements OnModuleInit {
     } catch (error) {
       await this.client.createCollection(collectionName, {
         vectors: {
-          size: 768, // nomic-embed-text dimension
+          size: 768,
           distance: 'Cosine',
+        },
+        hnsw_config: {
+          m: 16,
+          ef_construct: 100,
         },
       });
       this.logger.log(`✅ Created collection: ${collectionName}`);
@@ -69,17 +71,21 @@ export class VectorStoreService implements OnModuleInit {
     }
   }
 
-  async searchKnowledge(embedding: number[], limit: number = 5) {
+  async searchKnowledge(embedding: number[], limit: number = 8, minScore: number = 0.65) {
     try {
       const results = await this.client.search(this.knowledgeCollection, {
         vector: embedding,
         limit,
         with_payload: true,
-        score_threshold: 0.5, // Only return results with >50% similarity
+        score_threshold: minScore,
+        params: {
+          hnsw_ef: 128,
+          exact: false,
+        },
       });
 
       this.logger.log(
-        `🔍 Found ${results.length} knowledge items (scores: ${results.map((r) => r.score.toFixed(2)).join(', ')})`,
+        `🔍 Found ${results.length}/${limit} knowledge items (threshold: ${minScore}, scores: ${results.map((r) => r.score.toFixed(2)).join(', ')})`,
       );
       return results;
     } catch (error) {
@@ -165,7 +171,6 @@ export class VectorStoreService implements OnModuleInit {
 
   async clearUserConversations(userId: string) {
     try {
-      // Delete all conversations for a specific user
       await this.client.delete(this.conversationCollection, {
         filter: {
           must: [
@@ -187,12 +192,10 @@ export class VectorStoreService implements OnModuleInit {
   // ========== LEGACY METHODS (for backward compatibility) ==========
 
   async storeContext(id: string, text: string, embedding: number[], metadata: any = {}) {
-    // Default to knowledge base
     return this.storeKnowledge(id, text, embedding, metadata);
   }
 
-  async searchSimilar(embedding: number[], limit: number = 5) {
-    // Default to knowledge base
+  async searchSimilar(embedding: number[], limit: number = 8) {
     return this.searchKnowledge(embedding, limit);
   }
 

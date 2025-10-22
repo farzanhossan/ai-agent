@@ -33,6 +33,7 @@ export class LlmCategorizerService {
       // Parse response
       const cleanedResponse = this.cleanJsonResponse(response);
       const result: LLMCategoryResult = JSON.parse(cleanedResponse);
+      console.log('🚀 ~ LlmCategorizerService ~ categorize ~ result:', result);
 
       // Validate result
       this.validateCategoryResult(result);

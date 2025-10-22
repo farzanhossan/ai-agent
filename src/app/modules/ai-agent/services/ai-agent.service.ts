@@ -13,6 +13,48 @@ You are friendly, professional, and knowledgeable.
 Always provide accurate and helpful responses.
 If you don't know something, admit it honestly.`;
 
+  // Common countries list for detection
+  private readonly COUNTRIES = [
+    'australia',
+    'canada',
+    'usa',
+    'united states',
+    'uk',
+    'united kingdom',
+    'germany',
+    'france',
+    'italy',
+    'spain',
+    'netherlands',
+    'sweden',
+    'norway',
+    'denmark',
+    'finland',
+    'japan',
+    'korea',
+    'south korea',
+    'singapore',
+    'malaysia',
+    'uae',
+    'dubai',
+    'saudi arabia',
+    'turkey',
+    'pakistan',
+    'india',
+    'bangladesh',
+    'nepal',
+    'sri lanka',
+    'china',
+    'russia',
+    'brazil',
+    'mexico',
+    'south africa',
+    'new zealand',
+    'ireland',
+    'portugal',
+    'switzerland',
+  ];
+
   constructor(
     private vectorStore: VectorStoreService,
     private llmService: LlmService,
@@ -21,102 +63,134 @@ If you don't know something, admit it honestly.`;
     this.logger.log('✅ AI Agent Service initialized');
   }
 
+  private availableCountriesCache: string[] = [];
+  private cacheLastUpdated: number = 0;
+  private CACHE_TTL = 300000; // 5 minutes
+
+  // ADD THIS NEW METHOD
+  private async refreshAvailableCountries(): Promise<void> {
+    try {
+      const allKnowledge: any = await this.vectorStore.getAllKnowledge(500);
+      const countriesFound = new Set<string>();
+
+      for (const item of allKnowledge) {
+        const text = (item.payload?.text || '').toLowerCase();
+
+        for (const country of this.COUNTRIES) {
+          if (text.includes(country)) {
+            countriesFound.add(country);
+          }
+        }
+      }
+
+      this.availableCountriesCache = Array.from(countriesFound);
+      this.cacheLastUpdated = Date.now();
+
+      this.logger.log(`🌍 Available countries: ${this.availableCountriesCache.join(', ')}`);
+    } catch (error) {
+      this.logger.error('Failed to refresh countries', error);
+    }
+  }
+
+  // ADD THIS NEW METHOD
+  private async getAvailableCountries(): Promise<string[]> {
+    const cacheAge = Date.now() - this.cacheLastUpdated;
+
+    if (cacheAge > this.CACHE_TTL || this.availableCountriesCache.length === 0) {
+      await this.refreshAvailableCountries();
+    }
+
+    return this.availableCountriesCache;
+  }
+
   /**
-   * IMPROVED Smart Chat with Human-like Responses
+   * Smart Chat - Main conversation handler
    */
   async smartChat(userId: string, message: string, sessionId?: string): Promise<any> {
     try {
       const session = sessionId || uuidv4();
 
-      // 1. Detect language accurately
+      // 1. Detect language
       const language = this.detectLanguage(message);
-      this.logger.log(`🌐 Detected language: ${language}`);
+      this.logger.log(`🌍 Language: ${language}`);
 
       // 2. Analyze user intent
       const intent = this.analyzeIntent(message);
       this.logger.log(`🎯 Intent: ${intent.type}`);
 
-      // 3. Generate embedding
-      const messageEmbedding = await this.llmService.generateEmbedding(message);
+      // 3. Extract country from message
+      const extractedCountry = this.extractCountry(message);
+      this.logger.log(`🏳️ Country in message: ${extractedCountry || 'none'}`);
 
-      // 4. Search knowledge base with targeted results
-      const searchLimit = intent.needsDetailed ? 5 : 3;
-      const knowledgeResults = await this.vectorStore.searchKnowledge(
-        messageEmbedding,
-        searchLimit,
-      );
-
-      this.logger.log(`🔍 Search: "${message}"`);
-      this.logger.log(`📊 Found ${knowledgeResults.length} items`);
-
-      // 5. Get session history
+      // 4. Get conversation history
       const history = this.memoryService.getHistory(userId, session);
       console.log('🚀 ~ AiAgentService ~ smartChat ~ history:', history);
 
-      // 6. Filter high-quality matches (stricter threshold)
-      const goodMatches = knowledgeResults.filter((ctx) => ctx.score > 0.65);
+      // 5. Get available countries from knowledge base
+      const availableCountries = await this.getAvailableCountries();
+      console.log('🚀 ~ AiAgentService ~ smartChat ~ availableCountries:', availableCountries);
 
-      // 7. Build minimal knowledge context
-      const knowledgeContext =
-        goodMatches.length > 0
-          ? goodMatches
-              .slice(0, 3)
-              .map((ctx) => {
-                const text = ctx.payload?.text || '';
-                return text;
-              })
-              .join('\n---\n')
-          : null;
+      // 6. Generate embedding and search
+      const messageEmbedding = await this.llmService.generateEmbedding(message);
+      const knowledgeResults = await this.vectorStore.searchKnowledge(messageEmbedding, 8, 0.65);
 
-      // 8. Build human-like prompt
-      const systemPrompt = this.buildHumanLikeVisaAgentPrompt(language, knowledgeContext, intent);
+      this.logger.log(`📚 Found ${knowledgeResults.length} knowledge items`);
 
-      // 9. Generate response
-      let response = await this.llmService.chat(systemPrompt, message, history);
-
-      // 9.5 POST-PROCESS: Enforce strict limits
-      response = this.enforceResponseLimits(response, language);
-
-      // 9.6 POST-PROCESS: Validate country matching
-      response = this.validateCountryMatch(message, response, knowledgeContext);
-
-      // Log response metrics
-      const wordCount = response.split(/\s+/).length;
-      const sentenceCount = (response.match(/[.!?]+/g) || []).length;
-      this.logger.log(`📏 Response: ${sentenceCount} sentences, ${wordCount} words`);
-
-      if (wordCount > 50 || sentenceCount > 3) {
-        this.logger.error(
-          `❌ RESPONSE QUALITY ISSUE: ${wordCount} words, ${sentenceCount} sentences`,
-        );
+      // 7. Filter and validate knowledge
+      let validKnowledge = knowledgeResults;
+      if (extractedCountry) {
+        validKnowledge = this.filterKnowledgeByCountry(knowledgeResults, extractedCountry);
+        this.logger.log(`🔍 Filtered to ${validKnowledge.length} items for ${extractedCountry}`);
       }
 
-      // 10. Save to memory
+      // 8. Build knowledge context
+      const knowledgeContext = this.buildKnowledgeContext(validKnowledge);
+
+      // 9. Build system prompt
+      const systemPrompt = this.buildSystemPrompt(
+        language,
+        intent,
+        knowledgeContext,
+        extractedCountry,
+        availableCountries,
+      );
+
+      // 10. Generate response
+      let response = await this.llmService.chat(systemPrompt, message, history);
+
+      // 11. Post-process response
+      response = this.postProcessResponse(response, language, message, extractedCountry);
+
+      // 12. Save to memory
       this.memoryService.addMessage(userId, session, 'user', message);
       this.memoryService.addMessage(userId, session, 'assistant', response);
 
-      // 11. Store conversation
+      // 13. Store conversation in vector DB
       await this.vectorStore.storeConversation(
         uuidv4(),
         `User: ${message}\nAssistant: ${response}`,
         messageEmbedding,
-        { userId, sessionId: session, timestamp: Date.now(), language },
+        {
+          userId,
+          sessionId: session,
+          timestamp: Date.now(),
+          language,
+          intent: intent.type,
+          country: extractedCountry,
+        },
       );
 
-      const result = {
+      return {
         response,
         sessionId: session,
         language,
         intent: intent.type,
-        knowledgeUsed: goodMatches.length > 0,
-        knowledgeCount: goodMatches.length,
-        bestScore: knowledgeResults[0]?.score || 0,
+        knowledgeUsed: validKnowledge.length > 0,
+        knowledgeCount: validKnowledge.length,
+        bestScore: validKnowledge[0]?.score || 0,
+        country: extractedCountry,
         timestamp: new Date(),
       };
-
-      this.logger.log(`✅ Response in ${language} using ${goodMatches.length} knowledge items`);
-
-      return result;
     } catch (error) {
       this.logger.error('❌ Smart chat failed', error);
       throw error;
@@ -124,58 +198,91 @@ If you don't know something, admit it honestly.`;
   }
 
   /**
-   * IMPROVED Language Detection
+   * Extract country name from message
+   */
+  private extractCountry(message: string): string | null {
+    const lowerMsg = message.toLowerCase();
+
+    for (const country of this.COUNTRIES) {
+      if (lowerMsg.includes(country)) {
+        return country;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Filter knowledge by country relevance
+   */
+  private filterKnowledgeByCountry(results: any[], targetCountry: string): any[] {
+    return results.filter((result) => {
+      const text = result.payload?.text?.toLowerCase() || '';
+      const category = result.payload?.category?.toLowerCase() || '';
+
+      // Check if the knowledge mentions the target country
+      if (text.includes(targetCountry.toLowerCase())) {
+        return true;
+      }
+
+      // If it's general info (not country-specific), keep it
+      if (category === 'general_faq' || category === 'assessment' || category === 'requirements') {
+        // Only keep if it doesn't mention OTHER countries
+        const mentionsOtherCountry = this.COUNTRIES.some(
+          (country) => country !== targetCountry && text.includes(country.toLowerCase()),
+        );
+        return !mentionsOtherCountry;
+      }
+
+      return false;
+    });
+  }
+
+  /**
+   * Build knowledge context string
+   */
+  private buildKnowledgeContext(results: any[]): string | null {
+    if (results.length === 0) return null;
+
+    const contexts = results
+      .slice(0, 3)
+      .map((r) => r.payload?.text || '')
+      .filter((t) => t.length > 0);
+
+    return contexts.length > 0 ? contexts.join('\n\n---\n\n') : null;
+  }
+
+  /**
+   * Detect language
    */
   private detectLanguage(message: string): string {
     const banglaPattern = /[\u0980-\u09FF]/;
-    const hasBanglaScript = banglaPattern.test(message);
-
-    // Check for pure English (no Bangla characters)
-    const englishPattern = /^[A-Za-z0-9\s\.,!?'"@#$%&*()-_+=;:<>\/\[\]{}]+$/;
-    const isPureEnglish = englishPattern.test(message);
-
-    if (isPureEnglish) {
-      return 'english';
-    }
-
-    if (hasBanglaScript) {
+    if (banglaPattern.test(message)) {
       return 'bangla';
     }
 
-    // Banglish detection - English letters but Bangla words
+    const englishPattern = /^[A-Za-z0-9\s\.,!?'"@#$%&*()-_+=;:<>\/\[\]{}]+$/;
+    if (englishPattern.test(message)) {
+      return 'english';
+    }
+
     const banglishKeywords = [
       'ami',
       'apni',
-      'apnar',
       'tumi',
       'kemon',
       'achen',
-      'korte',
       'chai',
       'pari',
       'hobe',
-      'kore',
       'thik',
-      'ase',
       'jabo',
-      'chaile',
       'bolun',
-      'janai',
-      'deben',
-      'korben',
-      'jante',
-      'chaichen',
-      'ektu',
       'ki',
       'kivabe',
-      'keno',
-      'kothai',
-      'kokhon',
     ];
     const lowerMsg = message.toLowerCase();
-    const hasBanglishWords = banglishKeywords.some((word) => lowerMsg.split(/\s+/).includes(word));
-
-    if (hasBanglishWords) {
+    if (banglishKeywords.some((word) => lowerMsg.includes(word))) {
       return 'banglish';
     }
 
@@ -183,376 +290,288 @@ If you don't know something, admit it honestly.`;
   }
 
   /**
-   * IMPROVED Intent Analysis
+   * Analyze intent
    */
   private analyzeIntent(message: string): { type: string; needsDetailed: boolean } {
     const lowerMsg = message.toLowerCase();
 
-    // Greeting
-    if (
-      lowerMsg.match(/^(hi|hello|hey|assalamu alaikum|salam|hola|hy|hii|hlw)/i) ||
-      lowerMsg.match(/(kemon achen|kemn acho|ki khobor|assalamualaikum)/i)
-    ) {
+    if (/^(hi|hello|hey|hy|hii|hlw|assalam)/i.test(lowerMsg)) {
       return { type: 'greeting', needsDetailed: false };
     }
 
-    // Specific visa inquiry
     if (
       lowerMsg.includes('visa') ||
       lowerMsg.includes('document') ||
-      lowerMsg.includes('kagoj') ||
-      lowerMsg.includes('requirement') ||
-      lowerMsg.includes('dorkar')
+      lowerMsg.includes('requirement')
     ) {
       return { type: 'visa_inquiry', needsDetailed: true };
     }
 
-    // Country/University inquiry
     if (
       lowerMsg.includes('university') ||
-      lowerMsg.includes('country') ||
       lowerMsg.includes('college') ||
-      lowerMsg.includes('deshe') ||
-      lowerMsg.includes('admission')
+      lowerMsg.includes('study')
     ) {
       return { type: 'education_inquiry', needsDetailed: true };
     }
 
-    // Process/timeline inquiry
     if (
-      lowerMsg.includes('time') ||
-      lowerMsg.includes('long') ||
-      lowerMsg.includes('process') ||
-      lowerMsg.includes('kotodin') ||
-      lowerMsg.includes('lagbe')
+      lowerMsg.includes('service') ||
+      lowerMsg.includes('country') ||
+      lowerMsg.includes('which')
     ) {
-      return { type: 'process_inquiry', needsDetailed: false };
+      return { type: 'service_inquiry', needsDetailed: false };
     }
 
-    // General question
+    if (lowerMsg.match(/^(yes|ok|okay|no|sure|alright|fine)$/i)) {
+      return { type: 'confirmation', needsDetailed: false };
+    }
+
     return { type: 'general', needsDetailed: false };
   }
 
   /**
-   * POST-PROCESSOR: Validate country matching
+   * Build system prompt
    */
-  private validateCountryMatch(
-    userMessage: string,
-    response: string,
-    knowledgeContext: string | null,
-  ): string {
-    // List of common countries
-    const countries = [
-      'australia',
-      'canada',
-      'usa',
-      'uk',
-      'germany',
-      'france',
-      'italy',
-      'spain',
-      'netherlands',
-      'sweden',
-      'norway',
-      'denmark',
-      'finland',
-      'japan',
-      'korea',
-      'singapore',
-      'malaysia',
-      'uae',
-      'saudi',
-      'turkey',
-      'pakistan',
-      'india',
-      'bangladesh',
-      'nepal',
-      'sri lanka',
-      'china',
-      'russia',
-      'brazil',
-      'mexico',
-      'south africa',
-      'new zealand',
-      'ireland',
-      'portugal',
-      'switzerland',
-    ];
-
-    const lowerMessage = userMessage.toLowerCase();
-    const lowerResponse = response.toLowerCase();
-
-    // Find country mentioned by user
-    const userCountry = countries.find((country) => lowerMessage.includes(country));
-
-    if (userCountry) {
-      // Check if response talks about the same country
-      if (!lowerResponse.includes(userCountry)) {
-        // Response talks about different country
-        const responseCountry = countries.find(
-          (country) => lowerResponse.includes(country) && country !== userCountry,
-        );
-
-        if (responseCountry) {
-          this.logger.warn(
-            `⚠️ COUNTRY MISMATCH: User asked ${userCountry}, AI responded ${responseCountry}`,
-          );
-
-          // Override with correct response
-          return `I don't have specific information about ${userCountry} right now. 😊\nWould you like information about ${responseCountry} instead?`;
-        }
-      }
-    }
-
-    return response;
-  }
-
-  /**
-   * POST-PROCESSOR: Enforce strict response limits
-   */
-  private enforceResponseLimits(response: string, language: string): string {
-    // 1. Remove excessive spaces
-    response = response.replace(/\s+/g, ' ').trim();
-
-    // 2. Split into sentences
-    let sentences = response.split(/([.!?]+)/).reduce((acc, part, i, arr) => {
-      if (i % 2 === 0 && part.trim()) {
-        const sentence = part.trim() + (arr[i + 1] || '');
-        acc.push(sentence);
-      }
-      return acc;
-    }, [] as string[]);
-
-    // 3. Limit to 3 sentences MAX
-    if (sentences.length > 3) {
-      sentences = sentences.slice(0, 3);
-      this.logger.warn(`⚠️ Response truncated from ${sentences.length} to 3 sentences`);
-    }
-
-    // 4. CRITICAL: Ensure exactly ONE question
-    const questionCount = (response.match(/\?/g) || []).length;
-    if (questionCount > 1) {
-      this.logger.warn(`⚠️ Multiple questions detected (${questionCount}), keeping only first`);
-
-      // Find first question and everything before it
-      const firstQuestionIndex = response.indexOf('?');
-      if (firstQuestionIndex !== -1) {
-        response = response.substring(0, firstQuestionIndex + 1);
-
-        // Re-split into sentences after truncation
-        sentences = response.split(/([.!?]+)/).reduce((acc, part, i, arr) => {
-          if (i % 2 === 0 && part.trim()) {
-            const sentence = part.trim() + (arr[i + 1] || '');
-            acc.push(sentence);
-          }
-          return acc;
-        }, [] as string[]);
-      }
-    }
-
-    // 5. Check word count
-    const wordCount = sentences.join(' ').split(/\s+/).length;
-    if (wordCount > 50) {
-      this.logger.warn(`⚠️ Response too long: ${wordCount} words, keeping first 2 sentences`);
-      sentences = sentences.slice(0, 2);
-    }
-
-    // 6. Ensure ends with question (if no question exists, add one)
-    const finalText = sentences.join(' ');
-    if (!finalText.includes('?')) {
-      const followUps = {
-        english: 'What else can I help with?',
-        bangla: 'আর কিছু জানতে চান?',
-        banglish: 'Ar kichu jante chan?',
-      };
-      sentences.push(followUps[language] || followUps.english);
-    }
-
-    // 7. Join with line breaks for better readability
-    return sentences.join('\n');
-  }
-
-  /**
-   * IMPROVED Human-like Prompt Builder
-   */
-  private buildHumanLikeVisaAgentPrompt(
+  private buildSystemPrompt(
     language: string,
-    knowledgeContext: string | null,
     intent: { type: string; needsDetailed: boolean },
+    knowledgeContext: string | null,
+    country: string | null,
+    availableCountries: string[],
   ): string {
     const prompts = {
       english: {
-        role: `You are a friendly Visa Consultant AI for VISATHing. Chat naturally like a human agent on Messenger.`,
+        role: `You are a friendly Visa Consultant for VISATHing. You help with visa applications and study abroad guidance.`,
 
-        greeting: `When user greets:
-- Respond warmly: "Hey there! 😊" or "Hi! Welcome to VISATHing!"
-- Ask ONE simple question: "How can I help you today?"
-- Keep it 1-2 sentences MAX`,
+        greeting: `When user greets, respond warmly and ask how you can help. Keep it 1-2 sentences.`,
 
-        inquiry: `When user asks about visa/documents:
+        inquiry: `When answering visa or study questions:
+- If you have relevant information, share the key points (2-3 sentences max)
+- Ask ONE follow-up question to help them better
+- Be specific and direct
+- NEVER mention countries not in your knowledge base unless the user specifically asks`,
 
-🚨 ULTRA-CRITICAL RULES - FOLLOW EXACTLY:
-1. Maximum 2-3 sentences TOTAL
-2. Ask EXACTLY ONE question (never two or more)
-3. You CAN list options in ONE question: "Tourist, student, or work?"
-4. NEVER ask separate questions: "What type? Tourist? Student? Work?"
-5. Ask for THE MOST IMPORTANT missing info only
-6. Read carefully - "for my son" means it's about the son
+        service: `When asked about services or countries:
+🚨 CRITICAL: You can ONLY provide services for these countries:
+${availableCountries.length > 0 ? availableCountries.join(', ') : 'NONE'}
 
-RESPONSE STRUCTURE (STRICT):
-Line 1: Acknowledge + confirm understanding
-Line 2: Ask ONE specific question
-STOP. Maximum 2-3 sentences total.
+- ONLY mention these countries, never others
+- If they ask about a country not in this list, say you don't have info
+- Be honest and specific
+- Ask which of THESE countries they're interested in`,
 
-QUESTION PRIORITY (ask ONE at a time):
-1st: Citizenship - "What's his citizenship?"
-2nd: Visa type - "Tourist, student, or work visa?" (options in ONE question)
-3rd: Location - "Which country is he in now?"
-4th: Documents - "Does he have a passport?"
+        confirmation: `When user says yes/ok/no:
+- Acknowledge their response
+- Continue the conversation naturally based on context
+- Ask for the NEXT piece of information needed
+- Don't repeat what was just discussed`,
 
-ONE QUESTION FORMATS (all correct):
-✅ "What's his citizenship?" (open question)
-✅ "Tourist, student, or work?" (options in one question)
-✅ "Does he have a passport?" (yes/no question)
-
-MULTIPLE QUESTIONS (all wrong):
-❌ "What's his citizenship? Which visa type?" (2 separate questions)
-❌ "What citizenship? What type? When?" (3 separate questions)
-❌ "What's his citizenship? Tourist or student?" (2 questions)
-
-PERFECT EXAMPLES:
-✅ "South African visa for your son? 😊\nWhat's his citizenship?"
-✅ "Pakistani citizen needs SA visa.\nTourist, student, or work?"
-✅ "Tourist visa - processing 4-6 weeks.\nDoes he have a passport?"`,
-
-        noInfo: `If no info:
-- Say: "I don't have that specific info right now."
-- Ask: "Could you tell me which country/visa type you're asking about?"
-- 2 sentences MAX`,
+        noInfo: `When you don't have information:
+- Be honest: "I don't have specific information about {country} at the moment."
+- Don't offer alternatives unless they make sense
+- Ask if they want to know about something else`,
       },
 
       bangla: {
-        role: `আপনি VISATHing-এর একজন বন্ধুত্বপূর্ণ ভিসা কনসালট্যান্ট AI। মেসেঞ্জারে মানুষের মতো কথা বলুন।`,
+        role: `আপনি VISATHing-এর বন্ধুত্বপূর্ণ ভিসা কনসালট্যান্ট। আপনি ভিসা আবেদন ও বিদেশে পড়াশোনায় সাহায্য করেন।`,
 
-        greeting: `যখন সম্ভাষণ:
-- উত্তর: "হাই! 😊 VISATHing-এ স্বাগতম!"
-- জিজ্ঞাসা: "আমি কীভাবে সাহায্য করতে পারি?"
-- সর্বোচ্চ ১-২ বাক্য`,
+        greeting: `যখন শুভেচ্ছা, উষ্ণভাবে সাড়া দিন এবং কীভাবে সাহায্য করতে পারেন জিজ্ঞাসা করুন। ১-২ বাক্য।`,
 
-        inquiry: `যখন ভিসা জিজ্ঞাসা:
-- শুধু ২-৩টি পয়েন্ট (দেশ, ভিসা ধরন, ফি বা সময়)
-- প্রতিটি পয়েন্ট = এক ছোট বাক্য
-- শেষে একটি প্রশ্ন:
-  "আপনি কোন দেশের ভিসা জানতে চান?"
-  "ডকুমেন্ট লিস্ট চান?"
-- লম্বা প্যারাগ্রাফ নয়`,
+        inquiry: `ভিসা বা পড়াশোনার প্রশ্নের উত্তরে:
+- প্রাসঙ্গিক তথ্য থাকলে মূল পয়েন্ট শেয়ার করুন (সর্বোচ্চ ২-৩ বাক্য)
+- একটি ফলো-আপ প্রশ্ন করুন
+- সরাসরি এবং নির্দিষ্ট হন`,
 
-        noInfo: `যদি তথ্য নেই:
-- বলুন: "এই মুহূর্তে এই তথ্য নেই।"
-- জিজ্ঞাসা: "আপনি কোন দেশ বা ভিসার ধরন?"
-- ২ বাক্য MAX`,
+        service: `সেবা বা দেশ সম্পর্কে জিজ্ঞাসায়:
+🚨 গুরুত্বপূর্ণ: আপনি শুধুমাত্র এই দেশগুলির জন্য সেবা দিতে পারেন: ${availableCountries.join(', ')}
+
+- শুধুমাত্র উপরের দেশগুলি উল্লেখ করুন, অন্য কোনো দেশ নয়
+- যদি তারা তালিকায় নেই এমন দেশ সম্পর্কে জিজ্ঞাসা করে, বলুন আপনার তথ্য নেই
+- সৎ হন: "আমার বর্তমানে [দেশের তালিকা] সম্পর্কে তথ্য আছে"
+- এই দেশগুলির মধ্যে কোনটিতে তারা আগ্রহী জিজ্ঞাসা করুন`,
+
+        confirmation: `যখন ব্যবহারকারী হ্যাঁ/ঠিক আছে/না বলে:
+- তাদের উত্তর স্বীকার করুন
+- প্রসঙ্গ অনুযায়ী স্বাভাবিকভাবে চালিয়ে যান
+- পরবর্তী প্রয়োজনীয় তথ্যের জন্য জিজ্ঞাসা করুন`,
+
+        noInfo: `যখন তথ্য নেই:
+- সৎ থাকুন: "আমার কাছে {country} সম্পর্কে নির্দিষ্ট তথ্য নেই।"
+- অপ্রাসঙ্গিক বিকল্প দেবেন না`,
       },
 
       banglish: {
-        role: `Tumi VISATHing-er friendly Visa Consultant AI. Messenger-e naturally chat koro.`,
+        role: `Tumi VISATHing-er friendly Visa Consultant. Tumi visa application aar study abroad-e help koro.`,
 
-        greeting: `Jokhn greet kore:
-- Response: "Hey! 😊 VISATHing-e welcome!"
-- Jigges: "Ami kivabe help korte pari?"
-- Max 1-2 line`,
+        greeting: `Greet korle warmly respond koro aar ki help korte paro jigges koro. 1-2 sentence.`,
 
-        inquiry: `Jokhn visa jigges kore:
-- Shudhu 2-3 point (country, visa type, fee ba time)
-- Each point = ek chhoto line
-- Sheshe ekta question:
-  "Apni kon desher visa jante chacchen?"
-  "Document list chai?"
-- Lomba paragraph na`,
+        inquiry: `Visa ba study question-er answer-e:
+- Relevant info thakle key points share koro (max 2-3 sentence)
+- EK follow-up question koro
+- Direct aar specific hobe`,
 
-        noInfo: `Jodi info nei:
-- Bolo: "Ei muhurte ei info nei."
-- Jigges: "Apni kon desh ba visa type?"
-- 2 line MAX`,
+        service: `Service ba country jigges korle:
+🚨 IMPORTANT: Tumi SHUDHU ei countries-er jonno service dite paro: ${availableCountries.join(', ')}
 
-        strict: `🚨 CRITICAL BANGLISH RULES - MUST FOLLOW:
+- SHUDHU uporer countries mention koro, onno kono country na
+- Jodi tara list-e nei emon country jigges kore, bolo tomar info nei
+- Honest hoye bolo: "Amar kache [country list] somporkhe info ache"
+- EI countries-er moddhe konta interested jigges koro`,
 
-❌ NEVER use these Hindi/Urdu words:
-- kya, hai, acha, theek hai
-- baare mein, ke baare mein
-- kar sakta, kar sakte
-- jaanna chahte, kariye, kijiye
-- aap (use "apni"), main (use "ami")
+        confirmation: `Jokhn yes/ok/no bole:
+- Response acknowledge koro
+- Context onujayi naturally continue koro
+- Next information-er jonno jigges koro`,
 
-✅ ONLY use Bangla words in English:
-- "apni" (NOT "aap")
-- "ami" (NOT "main") 
-- "korte pari" (NOT "kar sakta")
-- "thik ache" (NOT "theek hai")
-- "jante chaichen" (NOT "jaanna chahte")
-- "kivabe" (NOT "kaise")
-- "keno" (NOT "kyu")
-
-✅ Safe Banglish patterns:
-- "Apni kon country-te jete chaichen?"
-- "Ami apnake help korte pari 😊"
-- "Ektu wait korun, ami check korchi"
-- "Thik ache, ami document list share korbo"
-- "Apnar kono question thakle bolte paren"
-
-✅ When unsure, mix English + Banglish:
-- "Apni Canada-r visa nite chaichen?"
-- "Processing time usually 2-3 months lage"`,
+        noInfo: `Jokhn info nei:
+- Honest hao: "Amar kache {country} somporkhe specific info nei."
+- Irrelevant alternative dio na`,
       },
     };
 
     const config = prompts[language] || prompts.english;
-    const intentGuide = intent.type === 'greeting' ? config.greeting : config.inquiry;
+    let guideText = '';
 
-    return `${config.role}
+    if (intent.type === 'greeting') {
+      guideText = config.greeting;
+    } else if (intent.type === 'service_inquiry') {
+      guideText = config.service;
+    } else if (intent.type === 'confirmation') {
+      guideText = config.confirmation;
+    } else if (intent.type === 'visa_inquiry' || intent.type === 'education_inquiry') {
+      guideText = config.inquiry;
+    } else {
+      guideText = config.inquiry;
+    }
 
-${knowledgeContext ? `📚 INFO:\n${knowledgeContext}\n` : ''}
+    let prompt = `${config.role}\n\n`;
 
-${intentGuide}
+    if (knowledgeContext) {
+      prompt += `📚 RELEVANT INFORMATION:\n${knowledgeContext}\n\n`;
+    }
 
-${language === 'banglish' ? config.strict : ''}
+    prompt += `📋 GUIDELINES:\n${guideText}\n\n`;
 
-${
-  !knowledgeContext
-    ? config.noInfo
-    : `✅ Use info above. Keep SHORT (2-3 sentences). Ask follow-up question.`
-}
+    if (country && !knowledgeContext) {
+      prompt += `⚠️ NO INFORMATION ABOUT ${country.toUpperCase()}\n${config.noInfo.replace('{country}', country)}\n\n`;
+    }
 
-🎯 MANDATORY RESPONSE FORMAT:
-- Text like Messenger chat (short bubbles)
-- MAXIMUM 3 sentences (count before sending!)
-- MAXIMUM 40 words total
-- Add 1 emoji naturally 😊
-- End with ONE question only
-- NEVER multiple questions
-- NEVER "Should I send details?"
+    prompt += `🎯 RESPONSE RULES:
+- Maximum 3 sentences total
+- End with ONE question (not multiple)
+- Use simple, natural language like messenger chat
+- Add ONE emoji naturally 😊
+- Be consistent with previous conversation
+- If you don't know, say so directly
 
-📏 BEFORE RESPONDING:
-1. Count sentences (must be ≤ 3)
-2. Count words (must be ≤ 40)  
-3. Check: Does it end with ONE question?
-4. Check: Did I understand WHO needs the visa?
-5. If any check fails, rewrite shorter
+🚨 CRITICAL: 
+- NEVER mention countries you don't have information about
+- ONLY talk about countries that appear in the knowledge base above
+- If asked about a country not in your knowledge, say you don't have info about it`;
 
-🎭 CONTEXT COMPREHENSION:
-- "for my son" = son needs visa, not the user
-- "I am citizen" = user is citizen, asking for someone else
-- "my wife" = wife needs visa
-- Always clarify WHO + their citizenship first
+    prompt += `\n🌍 AVAILABLE COUNTRIES IN KNOWLEDGE BASE:
+${availableCountries.join(', ')}
 
-🚨 CRITICAL COUNTRY MATCHING RULE:
-- If user mentions a COUNTRY NAME (Australia, Canada, USA, Germany, etc.), you MUST respond about THAT EXACT COUNTRY
-- NEVER respond about a different country than what user asked
-- If knowledge base doesn't have info about that country, say: "I don't have info about [country] right now."
-- Examples:
-  User: "Australia" → You talk about Australia ONLY
-  User: "Canada" → You talk about Canada ONLY
-  User: "Germany" → You talk about Germany ONLY
-- If user asks "Australia" but knowledge shows "Germany", say: "I don't have Australia info. Want info about Germany instead?"`;
+🚨 ABSOLUTE RULE: NEVER mention any country not in the above list!`;
+
+    return prompt;
+  }
+
+  /**
+   * Post-process response
+   */
+  private postProcessResponse(
+    response: string,
+    language: string,
+    userMessage: string,
+    extractedCountry: string | null,
+  ): string {
+    // Clean up
+    response = response.replace(/\s+/g, ' ').trim();
+
+    // Split into sentences
+    let sentences = response.split(/([.!?]+)/).reduce((acc, part, i, arr) => {
+      if (i % 2 === 0 && part.trim()) {
+        acc.push(part.trim() + (arr[i + 1] || ''));
+      }
+      return acc;
+    }, [] as string[]);
+
+    // Limit to 3 sentences
+    if (sentences.length > 3) {
+      sentences = sentences.slice(0, 3);
+    }
+
+    // Check for country mismatch
+    const responseCountries = this.extractCountriesFromText(response);
+    if (extractedCountry && responseCountries.length > 0) {
+      const hasMatchingCountry = responseCountries.some(
+        (c) => c.toLowerCase() === extractedCountry.toLowerCase(),
+      );
+      const hasDifferentCountry = responseCountries.some(
+        (c) => c.toLowerCase() !== extractedCountry.toLowerCase(),
+      );
+
+      if (hasDifferentCountry && !hasMatchingCountry) {
+        // Response talks about wrong country
+        return this.generateNoInfoResponse(extractedCountry, language);
+      }
+    }
+
+    // Ensure exactly one question
+    const questionCount = (response.match(/\?/g) || []).length;
+    if (questionCount > 1) {
+      const firstQuestionIndex = response.indexOf('?');
+      response = response.substring(0, firstQuestionIndex + 1);
+      sentences = response.split(/([.!?]+)/).reduce((acc, part, i, arr) => {
+        if (i % 2 === 0 && part.trim()) {
+          acc.push(part.trim() + (arr[i + 1] || ''));
+        }
+        return acc;
+      }, [] as string[]);
+    }
+
+    // Add question if missing
+    if (!response.includes('?')) {
+      const followUps = {
+        english: 'How can I help further?',
+        bangla: 'আর কীভাবে সাহায্য করতে পারি?',
+        banglish: 'Ar ki help korte pari?',
+      };
+      sentences.push(followUps[language] || followUps.english);
+    }
+
+    return sentences.join('\n');
+  }
+
+  /**
+   * Extract countries mentioned in text
+   */
+  private extractCountriesFromText(text: string): string[] {
+    const lowerText = text.toLowerCase();
+    const found: string[] = [];
+
+    for (const country of this.COUNTRIES) {
+      if (lowerText.includes(country)) {
+        found.push(country);
+      }
+    }
+
+    return found;
+  }
+
+  /**
+   * Generate "no info" response
+   */
+  private generateNoInfoResponse(country: string, language: string): string {
+    const responses = {
+      english: `I don't have specific information about ${country} at the moment. 😊\nWhich other country are you interested in?`,
+      bangla: `আমার কাছে ${country} সম্পর্কে নির্দিষ্ট তথ্য নেই। 😊\nআপনি আর কোন দেশে আগ্রহী?`,
+      banglish: `Amar kache ${country} somporkhe specific info nei. 😊\nApni ar kon deshe interested?`,
+    };
+
+    return responses[language] || responses.english;
   }
 
   /**
@@ -758,6 +777,7 @@ ${
         sessionId,
         summary,
         messageCount: history.length,
+        history,
       };
     } catch (error) {
       this.logger.error('❌ Get summary failed', error);

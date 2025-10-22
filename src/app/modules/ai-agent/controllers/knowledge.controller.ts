@@ -1,8 +1,17 @@
-import { Controller, Post, Body, Get, Param, Put, Query, Logger } from '@nestjs/common';
-import { DynamicContextIngestionService } from '../services/knowledge/dynamic-ingestion.service';
-import { ContextLoaderService } from '../services/knowledge/context-loader.service';
+// knowledge.controller.ts
+import { Body, Controller, Get, Logger, Param, Post } from '@nestjs/common';
+import { CommandBus } from '@nestjs/cqrs';
+import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { Public } from '@src/app/decorators/publicRoute.decorator';
-import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
+import { v4 as uuidv4 } from 'uuid';
+
+import { KnowledgeAddCommand } from '@src/app/event-sourcing/commands/knowledge-add.command';
+import { KnowledgeBatchCommand } from '@src/app/event-sourcing/commands/knowledge-batch.command';
+import { KnowledgeLoadFileCommand } from '@src/app/event-sourcing/commands/knowledge-load-file.command';
+import { KnowledgeReloadCommand } from '@src/app/event-sourcing/commands/knowledge-reload.command';
+import { KnowledgeUrlCommand } from '@src/app/event-sourcing/commands/knowledge-url.command';
+import { DynamicContextIngestionService } from '../services/knowledge/dynamic-ingestion.service';
+import { IngestionStatusTracker } from '@src/app/event-sourcing/handlers/knowledge-ingestion.handler';
 
 @ApiTags('Ai Agent Knowledge')
 @ApiBearerAuth()
@@ -11,12 +20,13 @@ export class KnowledgeController {
   private readonly logger = new Logger(KnowledgeController.name);
 
   constructor(
-    private ingestionService: DynamicContextIngestionService,
-    private contextLoader: ContextLoaderService,
+    private cmdBus: CommandBus,
+    private statusTracker: IngestionStatusTracker,
+    private ingestionService: DynamicContextIngestionService, // For quick-test only
   ) {}
 
   /**
-   * Add knowledge from any content
+   * Add knowledge from any content (ASYNC)
    * POST /knowledge/add
    */
   @Public()
@@ -30,32 +40,41 @@ export class KnowledgeController {
       skipDuplicates?: boolean;
     },
   ) {
-    this.logger.log('📥 API: Adding knowledge...');
+    const requestId = uuidv4();
+    this.logger.log(`📥 API: Adding knowledge [${requestId}]`);
 
     try {
-      const result = await this.ingestionService.ingestContent(body.content, {
-        type: body.type,
-        source: body.source || 'api',
-        skipDuplicates: body.skipDuplicates !== false,
-      });
+      // Execute command asynchronously (don't await)
+      this.cmdBus.execute(
+        new KnowledgeAddCommand(
+          body.content,
+          {
+            type: body.type,
+            source: body.source,
+            skipDuplicates: body.skipDuplicates,
+          },
+          requestId,
+        ),
+      );
 
       return {
-        success: result.success,
-        message: `Processed ${result.itemsStored}/${result.itemsProcessed} items`,
-        data: result,
+        success: true,
+        message: 'Knowledge ingestion started',
+        requestId,
+        statusUrl: `/ai-agent/knowledge/status/${requestId}`,
       };
     } catch (error) {
-      this.logger.error(`Failed to add knowledge: ${error.message}`);
+      this.logger.error(`Failed to start knowledge ingestion: ${error.message}`);
       return {
         success: false,
         message: error.message,
-        data: null,
+        requestId: null,
       };
     }
   }
 
   /**
-   * Add multiple knowledge items
+   * Add multiple knowledge items (ASYNC)
    * POST /knowledge/add-batch
    */
   @Public()
@@ -70,102 +89,150 @@ export class KnowledgeController {
       }>;
     },
   ) {
-    this.logger.log(`📦 API: Adding batch of ${body.items.length} items...`);
+    const requestId = uuidv4();
+    this.logger.log(`📦 API: Adding batch [${requestId}]: ${body.items.length} items`);
 
     try {
-      const result = await this.ingestionService.ingestBatch(body.items);
+      this.cmdBus.execute(new KnowledgeBatchCommand(body.items, requestId));
 
       return {
-        success: result.success,
-        message: `Processed ${result.itemsStored}/${result.itemsProcessed} items`,
-        data: result,
+        success: true,
+        message: `Batch ingestion started for ${body.items.length} items`,
+        requestId,
+        statusUrl: `/ai-agent/knowledge/status/${requestId}`,
       };
     } catch (error) {
-      this.logger.error(`Batch add failed: ${error.message}`);
+      this.logger.error(`Batch ingestion failed: ${error.message}`);
       return {
         success: false,
         message: error.message,
-        data: null,
+        requestId: null,
       };
     }
   }
 
   /**
-   * Add from URL
+   * Add from URL (ASYNC)
    * POST /knowledge/add-from-url
    */
   @Public()
   @Post('add-from-url')
   async addFromUrl(@Body() body: { url: string }) {
-    this.logger.log(`🌐 API: Adding from URL: ${body.url}`);
+    const requestId = uuidv4();
+    this.logger.log(`🌐 API: Adding from URL [${requestId}]: ${body.url}`);
 
     try {
-      const result = await this.ingestionService.ingestFromUrl(body.url);
+      this.cmdBus.execute(new KnowledgeUrlCommand(body.url, requestId));
 
       return {
-        success: result.success,
-        message: `URL content processed`,
-        data: result,
+        success: true,
+        message: 'URL ingestion started',
+        requestId,
+        statusUrl: `/ai-agent/knowledge/status/${requestId}`,
       };
     } catch (error) {
       return {
         success: false,
         message: error.message,
-        data: null,
+        requestId: null,
       };
     }
   }
 
   /**
-   * Load knowledge base from file
+   * Load knowledge base from file (ASYNC)
    * POST /knowledge/load-file
    */
   @Public()
   @Post('load-file')
   async loadFromFile(@Body() body: { filePath?: string }) {
-    this.logger.log(`📁 API: Loading from file...`);
+    const requestId = uuidv4();
+    this.logger.log(`📁 API: Loading from file [${requestId}]`);
 
     try {
-      const result = await this.contextLoader.loadKnowledgeBase(body.filePath);
+      this.cmdBus.execute(new KnowledgeLoadFileCommand(body.filePath, requestId));
 
       return {
-        success: result.success,
-        message: `Loaded ${result.itemsStored} items`,
-        data: result,
+        success: true,
+        message: 'File load started',
+        requestId,
+        statusUrl: `/ai-agent/knowledge/status/${requestId}`,
       };
     } catch (error) {
       return {
         success: false,
         message: error.message,
-        data: null,
+        requestId: null,
       };
     }
   }
 
   /**
-   * Update existing knowledge
-   * PUT /knowledge/:id
+   * Reload knowledge base (ASYNC)
+   * POST /knowledge/reload
    */
   @Public()
-  @Put(':id')
-  async updateKnowledge(@Param('id') id: string, @Body() body: { content: string }) {
-    this.logger.log(`🔄 API: Updating knowledge ${id}...`);
+  @Post('reload')
+  async reload(@Body() body: { filePath?: string }) {
+    const requestId = uuidv4();
+    this.logger.log(`🔄 API: Reloading knowledge base [${requestId}]`);
 
     try {
-      const result = await this.contextLoader.updateKnowledge(id, body.content);
+      this.cmdBus.execute(new KnowledgeReloadCommand(body.filePath, requestId));
 
       return {
-        success: result.success,
-        message: result.message,
-        data: null,
+        success: true,
+        message: 'Reload started',
+        requestId,
+        statusUrl: `/ai-agent/knowledge/status/${requestId}`,
       };
     } catch (error) {
       return {
         success: false,
         message: error.message,
+        requestId: null,
+      };
+    }
+  }
+
+  /**
+   * Get ingestion status
+   * GET /knowledge/status/:requestId
+   */
+  @Public()
+  @Get('status/:requestId')
+  async getStatus(@Param('requestId') requestId: string) {
+    const status = this.statusTracker.getStatus(requestId);
+
+    if (!status) {
+      return {
+        success: false,
+        message: 'Request not found',
         data: null,
       };
     }
+
+    return {
+      success: true,
+      message: 'Status retrieved',
+      data: status,
+    };
+  }
+
+  /**
+   * Get all ingestion statuses
+   * GET /knowledge/status
+   */
+  @Public()
+  @Get('status')
+  async getAllStatuses() {
+    const statuses = this.statusTracker.getAllStatuses();
+
+    return {
+      success: true,
+      message: `Found ${statuses.length} ingestion requests`,
+      data: statuses,
+    };
   }
 
   /**
@@ -195,35 +262,10 @@ export class KnowledgeController {
   }
 
   /**
-   * Reload knowledge base
-   * POST /knowledge/reload
-   */
-  @Public()
-  @Post('reload')
-  async reload(@Body() body: { filePath?: string }) {
-    this.logger.log('🔄 API: Reloading knowledge base...');
-
-    try {
-      const result = await this.contextLoader.reloadKnowledgeBase(body.filePath);
-
-      return {
-        success: result.success,
-        message: `Reloaded ${result.itemsStored} items`,
-        data: result,
-      };
-    } catch (error) {
-      return {
-        success: false,
-        message: error.message,
-        data: null,
-      };
-    }
-  }
-
-  /**
-   * Quick test endpoint
+   * Quick test endpoint (SYNCHRONOUS)
    * POST /knowledge/quick-test
    */
+  @Public()
   @Post('quick-test')
   async quickTest(@Body() body: { text: string }) {
     this.logger.log('🧪 API: Quick test...');
