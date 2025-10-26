@@ -102,7 +102,15 @@ export class ContentProcessorService {
   /**
    * Process JSON data
    */
-  private processJson(jsonData: any): ProcessedContent {
+  private processJson(_jsonData: any): ProcessedContent {
+    console.log('Processing JSON data', _jsonData);
+
+    let jsonData = _jsonData
+      .replace(/:\s*NaN/g, ': null')
+      .replace(/:\s*Infinity/g, ': null')
+      .replace(/:\s*-Infinity/g, ': null')
+      .replace(/:\s*undefined/g, ': null');
+
     let data = jsonData;
 
     // If it's a string, parse it
@@ -226,34 +234,6 @@ export class ContentProcessorService {
   }
 
   /**
-   * Convert JSON object to readable text
-   */
-  private jsonToText(obj: any, prefix: string = ''): string {
-    const parts: string[] = [];
-
-    for (const [key, value] of Object.entries(obj)) {
-      const formattedKey = key.replace(/_/g, ' ');
-
-      if (value === null || value === undefined) {
-        continue;
-      }
-
-      if (typeof value === 'object' && !Array.isArray(value)) {
-        // Nested object
-        parts.push(this.jsonToText(value, formattedKey));
-      } else if (Array.isArray(value)) {
-        // Array
-        parts.push(`${formattedKey}: ${value.join(', ')}`);
-      } else {
-        // Simple value
-        parts.push(`${formattedKey}: ${value}`);
-      }
-    }
-
-    return parts.join('. ');
-  }
-
-  /**
    * Chunk large text into smaller pieces
    */
   private chunkText(text: string): string[] {
@@ -304,5 +284,35 @@ export class ContentProcessorService {
     if (wordCount < 500) return 500;
     if (wordCount < 1000) return 1000;
     return 2000;
+  }
+
+  // In content-processor.service.ts
+  private jsonToText(obj: any, prefix: string = ''): string {
+    const parts: string[] = [];
+
+    for (const [key, value] of Object.entries(obj)) {
+      const formattedKey = key.replace(/_/g, ' ');
+
+      if (value === null || value === undefined) {
+        continue;
+      }
+
+      if (Array.isArray(value)) {
+        // FIX: Handle array of objects properly
+        if (value.length > 0 && typeof value[0] === 'object') {
+          const arrayTexts = value.map((item) => this.jsonToText(item));
+          parts.push(`${formattedKey}: ${arrayTexts.join('; ')}`);
+        } else {
+          parts.push(`${formattedKey}: ${value.join(', ')}`);
+        }
+      } else if (typeof value === 'object') {
+        // Nested object - recurse
+        parts.push(this.jsonToText(value, formattedKey));
+      } else {
+        parts.push(`${formattedKey}: ${value}`);
+      }
+    }
+
+    return parts.join('. ');
   }
 }
