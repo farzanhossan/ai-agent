@@ -80,7 +80,7 @@
     "request-promise": "^4.2.6",
     "rimraf": "^6.0.1",
     "rxjs": "^7.8.0",
-    "typeorm": "^0.3.11",
+    "typeorm": "^0.3.26",
     "utils-friendly": "^4.1.1",
     "winston": "^3.8.2"
   },
